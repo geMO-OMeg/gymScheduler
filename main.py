@@ -92,7 +92,6 @@ def test_scheduler():
             class_key = (program, block_id)
             classUsage_list.setdefault(class_key, []).append(interval)
 
-            equip_usage.setdefault(equip, []).append(interval)
             equip_intervals.append({
                 "program": program,
                 "block": block_id,
