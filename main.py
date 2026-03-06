@@ -8,21 +8,28 @@ print the result
 from ortools.sat.python import cp_model
 import pandas as pd
 
+"""
+import logging
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+#replace print-debug with:
+logger.debug("a message about a var: %s", some_var)
+"""
 
-def to_time_str(min):
-    h = min // 60
-    m = min % 60
+def to_time_str(minutes):
+    h = minutes // 60
+    m = minutes % 60
     return f"{h:02d}:{m:02d}"
 
 
-def test_scheduler():
+def run_scheduler():
 
     user_classes = [{"program": "FUT 8-10", "block": "b11"},
-                    {"program": "BBYS B", "block": "b7"}
+                    {"program": "BBYS B", "block": "b7"},
+                    {"program": "FUT 10+ B", "block": "b51"}
     ]
 
     #load event_map spreadsheet-----------------------------------------------------------------
-    import pandas as pd
 
     df = pd.read_excel("event_map.xlsx")
 
@@ -32,16 +39,13 @@ def test_scheduler():
         for _, row in df.iterrows()
     }
 
-    #print(program_equipment)
-
     #load time_slots spreadsheet
     df = pd.read_excel("time_slots.xlsx")
 
     df["start_time"] = df["start_time"].apply(lambda t: t.hour * 60 + t.minute)
 
-    timeBlocks = df.set_index("block_id").to_dict("index")
+    time_Blocks = df.set_index("block_id").to_dict("index")
 
-    #print(timeBlocks)
     #------------------------------------------------------------------------------------------
     
     # create the model
@@ -49,16 +53,16 @@ def test_scheduler():
 
     equip_intervals = []
     equip_usage = {}
-    classUsage_list = {}
+    class_Usage_list = {}
 
     for entry in user_classes: 
         program = entry["program"]
         block_id = entry["block"]
 
-        equipment_list = program_equipment[program]
+        equipment_list = program_equipment[program.strip().upper()]
         n = len(equipment_list)
 
-        info = timeBlocks[block_id]
+        info = time_Blocks[block_id]
 
         start = info["start_time"] + info["warmUp_time"]
         end = start + info["block_time"] * n
@@ -90,7 +94,7 @@ def test_scheduler():
 
             #track for intra-class conflicts
             class_key = (program, block_id)
-            classUsage_list.setdefault(class_key, []).append(interval)
+            class_Usage_list.setdefault(class_key, []).append(interval)
 
             equip_intervals.append({
                 "program": program,
@@ -105,7 +109,7 @@ def test_scheduler():
         if len(interv) > 1:
             model.add_no_overlap(interv)
 
-    for class_key, intervals in classUsage_list.items():
+    for class_key, intervals in class_Usage_list.items():
         if len(intervals) > 1:
             model.add_no_overlap(intervals)
 
@@ -115,6 +119,7 @@ def test_scheduler():
     # solve
 
     solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
     status = solver.Solve(model)
 
 
@@ -140,4 +145,7 @@ def test_scheduler():
   
 
 if __name__ == "__main__":
-    test_scheduler()
+    run_scheduler()
+
+    #TODO: make .xlsx file paths constants at top of file or accept them as parameter to run_scheduler()
+    # TODO: split load, model and print into 3 functions: load_data(), build_model(), solve_and_print() 
