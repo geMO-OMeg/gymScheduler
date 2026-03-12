@@ -64,3 +64,4 @@ Design Goals: Next Steps/ Open Questions/ Future Work
 - Attendance sheets: planned output product.  Will be generated from a separate function from the solver.
 - Auth on backend: backend endpoint will be open... add API key or Google Cloud IAP before deployment?
 - Other scheduling restrictions: meet with Project Manager to discuss full schedule restrictions.
+- Implement logging 

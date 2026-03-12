@@ -12,3 +12,8 @@
 - cleaned up file system
 - added code to access new folder instead of hardcoded paths
 - updated README and .gitignore
+
+0.0.4
+- moved data loading and solver functionalities to their own functions
+- switched from hardcoded file paths to project-root relative pathing using pathlib
+- removed hardcoded file paths
