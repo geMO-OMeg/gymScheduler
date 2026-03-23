@@ -29,109 +29,119 @@ def to_time_str(minutes):
     m = minutes % 60
     return f"{h:02d}:{m:02d}"
 
-
-
-def load_data():
-
-    df = pd.read_excel(DATA_DIR / "event_map.xlsx")
-
-    program_equipment = {
-        row["Program"].strip().upper():
-        [str(v).strip() for v in row.drop("Program") if pd.notna(v) and str(v).strip().upper() != "EMPTY"]
-        for _, row in df.iterrows()
-    }
-
-    #load time_slots spreadsheet
-    df = pd.read_excel(DATA_DIR / "time_slots.xlsx")
-
-    df["start_time"] = df["start_time"].apply(lambda t: t.hour * 60 + t.minute)
-
-    time_Blocks = df.set_index("block_id").to_dict("index")
-
-    return program_equipment, time_Blocks
+def time_str_to_minutes(time_str):
+    h, m = map(int, time_str.split(":"))
+    return h * 60 + m
 
     
-def run_scheduler():
+def run_scheduler(day, classes, event_map):
 
-    #For testing
-    user_classes = [{"program": "FUT 8-10", "block": "b11"},
-                    {"program": "BBYS B", "block": "b7"},
-                    {"program": "FUT 10+ B", "block": "b51"}
-    ]
-
-    program_equipment, time_Blocks = load_data()
+    #build program_equipment lookup from event_map sent by Apps Script
+    #ex payload: { "TOTS": ["Beam", "Floor", "Bars"], "BOYS B": [...], ...}
+    program_equipment = {
+        entry["program"].strip().upper(): entry["events"]
+        for entry in event_map
+    }
 
     # create the model
     model = cp_model.CpModel()
-
     equip_intervals = []
     equip_usage = {}
     class_Usage_list = {}
 
-    for entry in user_classes: 
-        program = entry["program"]
-        block_id = entry["block"]
+    for entry in classes: 
+        program = entry["program"].strip().upper()
+        print_col = entry["print_col"]
+        start_minutes = entry["start_minutes"]
+        warmup_time = entry["warmup_time"]
+        block_time = entry["block_time"]
+        cooldown_time = entry["cooldown_time"]
+        requested_time = entry["requested_time"]
 
-        equipment_list = program_equipment[program.strip().upper()]
+        equipment_list = program_equipment.get(program, [])
+        if not equipment_list:
+            print(f"Warning: no equipment found for program {program}")
+            continue
+
         n = len(equipment_list)
 
-        info = time_Blocks[block_id]
+        # Equipment usage window: starts after warmup, ends before cooldown
+        window_start = start_minutes + warmup_time
+        window_end = window_start + block_time * n
 
-        start = info["start_time"] + info["warmUp_time"]
-        end = start + info["block_time"] * n
+        class_key = (program, print_col, requested_time)
+        class_Usage_list[class_key] = {
+            "warmup_end": window_start,
+            "items": []
+        }
 
         for equip in equipment_list:
-            duration = info["block_time"]
-
+            duration = block_time
             start_var = model.new_int_var(
-                start,
-                end - duration,
-                f"start_{program}_{block_id}_{equip}"
+                window_start,
+                window_end - duration,
+                f"start_{program}_{print_col}_{equip}"
             )
 
             end_var = model.new_int_var(
-                start + duration,
-                end,
-                f"end_{program}_{block_id}_{equip}"
+                window_start + duration,
+                window_end,
+                f"end_{program}_{print_col}_{equip}"
             )
 
             interval = model.new_interval_var(
                 start_var,
                 duration,
                 end_var,
-                f"interval_{program}_{block_id}_{equip}"
+                f"interval_{program}_{print_col}_{equip}"
             )
 
-            #track for equipment conflicts
+            #track for cross-class conflicts
             equip_usage.setdefault(equip, []).append(interval)
 
-            #track for intra-class conflicts
-            class_key = (program, block_id)
-            class_Usage_list.setdefault(class_key, []).append(interval)
+            #track for intra-class chaining constraint
+            class_Usage_list[class_key]["items"].append({
+                "start": start_var,
+                "end": end_var,
+                "interval": interval
+            })
 
             equip_intervals.append({
                 "program": program,
-                "block": block_id,
+                "print_col": print_col,
+                "requested_time": requested_time,
+                "start_minutes": start_minutes,
+                "warmup_time": warmup_time,
+                "block_time": block_time,
+                "cooldown_time": cooldown_time,
                 "equip": equip,
                 "start": start_var,
                 "end": end_var,
             })
 
-    #equipment conflict contsraint
-    for equip, interv in equip_usage.items():
-        if len(interv) > 1:
-            model.add_no_overlap(interv)
-
-    for class_key, intervals in class_Usage_list.items():
+    #cross-class equipment conflict constraint
+    for equip, intervals in equip_usage.items():
         if len(intervals) > 1:
             model.add_no_overlap(intervals)
 
-    solve_model(model, equip_intervals)
+    #intra-class constraints: pin first slot to warmup end, chain the rest
+    for class_key, data in class_Usage_list.items():
+        items = data["items"]
+        warmup_end = data["warmup_end"]
+
+        #pin first equipment slot to start exactly at warmup end
+        model.add(items[0]["start"] == warmup_end)
+
+        # Chain remaining slots: end of slot i == start of slot i+1
+        for i in range(len(items) - 1):
+            model.add(items[i]["end"] == items[i+1]["start"])
+
+    return solve_model(model, equip_intervals)
+
+      
 
 
 def solve_model(model, equip_intervals):
-
-    # solve
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10.0
@@ -142,25 +152,84 @@ def solve_model(model, equip_intervals):
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         print("Cannot be solved:\n")
-        return
+        return {"status": "infeasible", "coaches": []}
     
+    coaches = {}
+        
     print("Schedule:\n")
     for entry in equip_intervals:
-        prog = entry["program"]
-        block = entry["block"]
-        equipment = entry["equip"]
-        startime = solver.Value(entry["start"]) 
-        endtime = solver.Value(entry["end"]) 
+        print_col = entry["print_col"]
+        start_min = solver.Value(entry["start"])
+        end_min = solver.Value(entry["end"])
 
+        if print_col not in coaches:
+            coaches[print_col] = {
+                "print_col": print_col,
+                "blocks": []
+            }
 
-        print(
-            f"{prog:10s} | block {block:4s}  |  {equipment:6s} | "
-            f"{to_time_str(startime)} --> {to_time_str(endtime)}"
+            if entry["warmup_time"] > 0:
+                warmup_start = entry["start_minutes"]
+                warmup_end = warmup_start + entry["warmup_time"]
+                for t in range(warmup_start, warmup_end, 5):
+                    coaches[print_col]["blocks"].append({
+                        "time": to_time_str(t),
+                        "label": "WARM UP"
+                    })
+
+        # Add equipment blocks in 5-min increments
+        for t in range(start_min, end_min, 5):
+            coaches[print_col]["blocks"].append({
+                "time": to_time_str(t),
+                "label": entry["equip"]
+            })
+
+    # Add cooldown after last equipment block for each coach
+    for print_col, data in coaches.items():
+        last_entry = next(
+            e for e in reversed(equip_intervals)
+            if e["print_col"] == print_col
         )
-  
+        last_end = solver.Value(last_entry["end"])
+        cooldown_time = last_entry["cooldown_time"]
+        for t in range(last_end, last_end + cooldown_time, 5):
+            data["blocks"].append({
+                "time": to_time_str(t),
+                "label": "COOL DOWN"
+            })
+
+    return {"status": "ok", "coaches": list(coaches.values())}
 
 if __name__ == "__main__":
-    run_scheduler()
+    
+    #local test - mirrors what apps script would send
 
-    #TODO: make .xlsx file paths constants at top of file or accept them as parameter to run_scheduler()
-    # TODO: split load, model and print into 3 functions: load_data(), build_model(), solve_and_print() 
+    test_classes = [
+        {
+            "print_col": "D",
+            "program": "TOTS",
+            "requested_time": "4:15",
+            "start_minutes": 255,
+            "warmup_time": 10,
+            "block_time": 10,
+            "cooldown_time": 5
+        },
+        {
+            "print_col": "E",
+            "program": "BOYS B",
+            "requested_time": "5:00",
+            "start_minutes": 300,
+            "warmup_time": 25,
+            "block_time": 15,
+            "cooldown_time": 10 
+        }
+    ]
+    test_event_map = [
+        {"program": "TOTS", "events": ["Beam", "Floor", "Bars"]},
+        {"program": "BOYS B", "events": ["Floor", "Bars", "Rings"]},
+    ]
+    
+    result = run_scheduler("TUESDAY", test_classes, test_event_map)
+    print(result)
+
+    

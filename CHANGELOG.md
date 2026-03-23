@@ -23,3 +23,14 @@
 - Added apps_script/ folder to organize test Apps Script code for potential future use.
 - Added apps_script/sheets_toJson_toDrive.ts as a test script to validate JSON data generated from Google Sheets.
 - Set up FastAPI to validate data transfer between Apps Script and FastAPI via ngrok before integrating with scheduler code.
+
+0.0.6
+scheduler.py
+- removed use of .xlsx file dependencies, relevant data will be part of the API payload
+- using chained equality to ensure first equipment slot starts exactly at warmup end
+- scheduler returns JSON dict instead of printing to console
+- output grouped in blocks of 5-min increments (best for apps script parsing)
+main.py
+- added FastAPI endpoint POST /schedule
+- SheduleRequest model accepts payload parameters
+- calls run_scheduler() (in scheduler.py) and returns the result as JSON response
