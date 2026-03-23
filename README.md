@@ -65,3 +65,16 @@ Design Goals: Next Steps/ Open Questions/ Future Work
 - Auth on backend: backend endpoint will be open... add API key or Google Cloud IAP before deployment?
 - Other scheduling restrictions: meet with Project Manager to discuss full schedule restrictions.
 - Implement logging 
+
+Error Handling (Hybrid)
+- Apps script will validate logic
+- show detailed error messages
+- highlight problem cells --> required fields
+- Add suggestions/notes/tips (only if necessary)
+- prevent submissions
+    - if data is missing for an option or selection
+        - if a class is added but no timeframe
+        - if a coach name is missing
+        - if timestamps/classes are duplicated for 1 coach (?)
+        - "if not empty" conditional formatting
+        - dropdown menus for times and classes

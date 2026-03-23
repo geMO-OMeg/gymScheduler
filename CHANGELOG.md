@@ -17,3 +17,9 @@
 - moved data loading and solver functionalities to their own functions
 - switched from hardcoded file paths to project-root relative pathing using pathlib
 - removed hardcoded file paths
+
+0.0.5
+- Renamed main.py to scheduler.py (FastAPI requires its entry point to be named main.py).
+- Added apps_script/ folder to organize test Apps Script code for potential future use.
+- Added apps_script/sheets_toJson_toDrive.ts as a test script to validate JSON data generated from Google Sheets.
+- Set up FastAPI to validate data transfer between Apps Script and FastAPI via ngrok before integrating with scheduler code.
