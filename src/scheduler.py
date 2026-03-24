@@ -8,19 +8,20 @@ print the result
 from ortools.sat.python import cp_model
 import pandas as pd
 from pathlib import Path
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT_DIR / "data"
-
-"""
-#Logging Function
 import logging
-logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger(__name__)
-#replace print-debug with:
-logger.debug("a message about a var: %s", some_var)
-"""
 
+LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+#Logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_DIR / "scheduler.log")
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 
@@ -29,19 +30,18 @@ def to_time_str(minutes):
     m = minutes % 60
     return f"{h:02d}:{m:02d}"
 
-def time_str_to_minutes(time_str):
-    h, m = map(int, time_str.split(":"))
-    return h * 60 + m
-
     
 def run_scheduler(day, classes, event_map):
 
     #build program_equipment lookup from event_map sent by Apps Script
     #ex payload: { "TOTS": ["Beam", "Floor", "Bars"], "BOYS B": [...], ...}
+    logger.debug("run_scheduler called: day=%s, %d classes", day, len(classes))
+
     program_equipment = {
         entry["program"].strip().upper(): entry["events"]
         for entry in event_map
     }
+    logger.debug("program_equipment loaded: %s", list(program_equipment.keys()))
 
     # create the model
     model = cp_model.CpModel()
@@ -62,6 +62,11 @@ def run_scheduler(day, classes, event_map):
         if not equipment_list:
             print(f"Warning: no equipment found for program {program}")
             continue
+        logger.debug(
+            "Processing %s | col %s | start=%d | warmup=%d | block=%d | cooldown=%d",
+            program, entry["print_col"], entry["start_minutes"],
+            entry["warmup_time"], entry["block_time"], entry["cooldown_time"]
+        )
 
         n = len(equipment_list)
 
@@ -146,10 +151,9 @@ def solve_model(model, equip_intervals):
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10.0
     status = solver.Solve(model)
-
+    logger.debug("Solver status: %s", solver.StatusName(status))
 
     #output result
-
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         print("Cannot be solved:\n")
         return {"status": "infeasible", "coaches": []}
@@ -161,6 +165,11 @@ def solve_model(model, equip_intervals):
         print_col = entry["print_col"]
         start_min = solver.Value(entry["start"])
         end_min = solver.Value(entry["end"])
+        logger.debug(
+            "%s | col %s | %s --> %s",
+            entry["program"], print_col, entry["equip"],
+            to_time_str(start_min), to_time_str(end_min)
+        )
 
         if print_col not in coaches:
             coaches[print_col] = {

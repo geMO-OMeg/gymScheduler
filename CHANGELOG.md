@@ -34,3 +34,7 @@ main.py
 - added FastAPI endpoint POST /schedule
 - SheduleRequest model accepts payload parameters
 - calls run_scheduler() (in scheduler.py) and returns the result as JSON response
+
+0.0.7
+- added logging to scheduler.py.  Logs will be saved to log folder in project root
+- updated .gitignore to exclude log files
