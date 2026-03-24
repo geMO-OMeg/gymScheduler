@@ -155,7 +155,7 @@ def solve_model(model, equip_intervals):
 
     #output result
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        print("Cannot be solved:\n")
+        logger.debug("Cannot be solved: %s \n", solver.StatusName(status))
         return {"status": "infeasible", "coaches": []}
     
     coaches = {}
