@@ -6,24 +6,44 @@ print the result
 """
 
 from ortools.sat.python import cp_model
-import pandas as pd
 from pathlib import Path
 import logging
 
 LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
+#-----------------------------------------------------------------------
 #Logging
+'''
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_DIR / "scheduler.log")
+        logging.FileHandler(LOG_DIR / "scheduler.log"),
     ]
 )
 logger = logging.getLogger(__name__)
+'''
+#temp logger to bypass basicConfig conflict with uvicorn test enviro
+#get logger directly
+logger = logging.getLogger('scheduler')
+logger.setLevel(logging.DEBUG)
 
-
+#prevent duplicate handlers if module is reloaded
+if not logger.handlers:
+    #file handler
+    fh = logging.FileHandler(LOG_DIR / "scheduler.log")
+    fh.setLevel(logging.DEBUG)
+    #terminal handler
+    sh = logging.StreamHandler()
+    sh.setLevel(logging.DEBUG)
+    #Formatter
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    fh.setFormatter(fmt)
+    sh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+#------------------------------------------------------------------
 
 def to_time_str(minutes):
     h = minutes // 60
@@ -60,7 +80,7 @@ def run_scheduler(day, classes, event_map):
 
         equipment_list = program_equipment.get(program, [])
         if not equipment_list:
-            print(f"Warning: no equipment found for program {program}")
+            logger.debug(f"Warning: no equipment found for program {program}")
             continue
         logger.debug(
             "Processing %s | col %s | start=%d | warmup=%d | block=%d | cooldown=%d",
@@ -153,59 +173,82 @@ def solve_model(model, equip_intervals):
     status = solver.Solve(model)
     logger.debug("Solver status: %s", solver.StatusName(status))
 
-    #output result
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        logger.debug("Cannot be solved: %s \n", solver.StatusName(status))
+        logger.warning("Cannot be solved: %s", solver.StatusName(status))
         return {"status": "infeasible", "coaches": []}
-    
-    coaches = {}
-        
-    print("Schedule:\n")
-    for entry in equip_intervals:
-        print_col = entry["print_col"]
-        start_min = solver.Value(entry["start"])
-        end_min = solver.Value(entry["end"])
-        logger.debug(
-            "%s | col %s | %s --> %s",
-            entry["program"], print_col, entry["equip"],
-            to_time_str(start_min), to_time_str(end_min)
-        )
 
+    # Group equip_intervals by (print_col, requested_time) — one group per class
+    from collections import defaultdict
+    class_groups = defaultdict(list)
+    for entry in equip_intervals:
+        class_key = (entry["print_col"], entry["requested_time"])
+        class_groups[class_key].append(entry)
+
+    # Sort classes within each coach by actual solved start time
+    # Then sort all classes across coaches by print_col then start time
+    sorted_classes = sorted(
+        class_groups.items(),
+        key=lambda x: (x[0][0], solver.Value(x[1][0]["start"]))
+    )
+
+    coaches = {}
+
+    for (print_col, requested_time), entries in sorted_classes:
         if print_col not in coaches:
             coaches[print_col] = {
                 "print_col": print_col,
                 "blocks": []
             }
 
-            if entry["warmup_time"] > 0:
-                warmup_start = entry["start_minutes"]
-                warmup_end = warmup_start + entry["warmup_time"]
-                for t in range(warmup_start, warmup_end, 5):
-                    coaches[print_col]["blocks"].append({
-                        "time": to_time_str(t),
-                        "label": "WARM UP"
-                    })
+        # Sort equipment entries within this class by solved start time
+        entries_sorted = sorted(entries, key=lambda e: solver.Value(e["start"]))
+        first_entry = entries_sorted[0]
+        last_entry = entries_sorted[-1]
 
-        # Add equipment blocks in 5-min increments
-        for t in range(start_min, end_min, 5):
-            coaches[print_col]["blocks"].append({
-                "time": to_time_str(t),
-                "label": entry["equip"]
-            })
+        # 1. Add warmup blocks for this class
+        if first_entry["warmup_time"] > 0:
+            warmup_start = first_entry["start_minutes"]
+            warmup_end = warmup_start + first_entry["warmup_time"]
+            for t in range(warmup_start, warmup_end, 5):
+                coaches[print_col]["blocks"].append({
+                    "time": to_time_str(t),
+                    "label": "WARM UP"
+                })
+            logger.debug(
+                "%s | col %s | WARM UP | %s --> %s",
+                first_entry["program"], print_col,
+                to_time_str(warmup_start), to_time_str(warmup_end)
+            )
 
-    # Add cooldown after last equipment block for each coach
-    for print_col, data in coaches.items():
-        last_entry = next(
-            e for e in reversed(equip_intervals)
-            if e["print_col"] == print_col
-        )
-        last_end = solver.Value(last_entry["end"])
-        cooldown_time = last_entry["cooldown_time"]
-        for t in range(last_end, last_end + cooldown_time, 5):
-            data["blocks"].append({
-                "time": to_time_str(t),
-                "label": "COOL DOWN"
-            })
+        # 2. Add equipment blocks for this class in solved order
+        for entry in entries_sorted:
+            start_min = solver.Value(entry["start"])
+            end_min = solver.Value(entry["end"])
+            logger.debug(
+                "%s | col %s | %s | %s --> %s",
+                entry["program"], print_col, entry["equip"],
+                to_time_str(start_min), to_time_str(end_min)
+            )
+            for t in range(start_min, end_min, 5):
+                coaches[print_col]["blocks"].append({
+                    "time": to_time_str(t),
+                    "label": entry["equip"]
+                })
+
+        # 3. Add cooldown blocks for this class
+        if last_entry["cooldown_time"] > 0:
+            cooldown_start = solver.Value(last_entry["end"])
+            cooldown_end = cooldown_start + last_entry["cooldown_time"]
+            for t in range(cooldown_start, cooldown_end, 5):
+                coaches[print_col]["blocks"].append({
+                    "time": to_time_str(t),
+                    "label": "COOL DOWN"
+                })
+            logger.debug(
+                "%s | col %s | COOL DOWN | %s --> %s",
+                last_entry["program"], print_col,
+                to_time_str(cooldown_start), to_time_str(cooldown_end)
+            )
 
     return {"status": "ok", "coaches": list(coaches.values())}
 
