@@ -38,3 +38,6 @@ main.py
 0.0.7
 - added logging to scheduler.py.  Logs will be saved to log folder in project root
 - updated .gitignore to exclude log files
+
+0.0.8
+- added dockerfile for google cloud deployment
