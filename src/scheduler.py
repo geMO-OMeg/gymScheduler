@@ -9,20 +9,22 @@ from ortools.sat.python import cp_model
 from pathlib import Path
 import logging
 
-LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+#LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
+#LOG_DIR.mkdir(exist_ok=True)
 
 #-----------------------------------------------------------------------
-#Logging
-'''
+#Logging --> cloud run will automatically store printouts to terminal in Google Cloud Logging
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_DIR / "scheduler.log"),
+        #logging.FileHandler(LOG_DIR / "scheduler.log"),
+        logging.StreamHandler() 
     ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("scheduler")
+#logger = logging.getLogger(__name__)
 '''
 #temp logger to bypass basicConfig conflict with uvicorn test enviro
 #get logger directly
@@ -43,6 +45,7 @@ if not logger.handlers:
     sh.setFormatter(fmt)
     logger.addHandler(fh)
     logger.addHandler(sh)
+'''
 #------------------------------------------------------------------
 
 def to_time_str(minutes):
