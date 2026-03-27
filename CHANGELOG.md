@@ -45,3 +45,6 @@ main.py
 0.0.9
 - modified logger to print to terminal allowing Google Cloud Logging to capture terminal printouts
 - created deploy.sh bash to re-upload and re-deploy docker image to cloud if changes to codebase
+
+0.0.10
+- increase scheduler flexibility so equipment slots are not fixed, no overlap, contiguous

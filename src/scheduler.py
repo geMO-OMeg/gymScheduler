@@ -100,6 +100,7 @@ def run_scheduler(day, classes, event_map):
         class_key = (program, print_col, requested_time)
         class_Usage_list[class_key] = {
             "warmup_end": window_start,
+            "window_end": window_end,
             "items": []
         }
 
@@ -156,13 +157,47 @@ def run_scheduler(day, classes, event_map):
     for class_key, data in class_Usage_list.items():
         items = data["items"]
         warmup_end = data["warmup_end"]
+        window_end = data["window_end"]
 
-        #pin first equipment slot to start exactly at warmup end
-        model.add(items[0]["start"] == warmup_end)
+        #All slots must start at or after warmup end
+        for item in items:
+            model.add(items[0]["start"] >= warmup_end)
 
-        # Chain remaining slots: end of slot i == start of slot i+1
-        for i in range(len(items) - 1):
-            model.add(items[i]["end"] == items[i+1]["start"])
+        # No overlap within the class -- slots can't run simultaneously
+        if len(items) > 1: 
+            model.add_no_overlap([item["interval"] for item in items])
+
+        #no gaps -- total equipment time must exactly fill the window
+        #sum of all slot durations == window_end - warmup_end
+        total_duration = sum(
+            entry["block_time"]
+            for entry in equip_intervals
+            if (entry["program"], entry["print_col"], entry["requested_time"]) == class_key
+        )
+        model.add(sum(item["end"] - item["start"] for item in items) == total_duration)
+
+    logger.debug("=== MODEL SUMMARY ===")
+    for entry in equip_intervals:
+        logger.debug(
+            "INTERVAL: %s | col %s | %s | window [%d - %d] duration %d",
+            entry["program"],
+            entry["print_col"],
+            entry["equip"],
+            entry["start_minutes"] + entry["warmup_time"],
+            entry["start_minutes"] + entry["warmup_time"] + entry["block_time"] * len(program_equipment.get(entry["program"], [])),
+            entry["block_time"]
+        )
+    logger.debug("=== EQUIPMENT GROUPS ===")
+    for equip, intervals in equip_usage.items():
+        logger.debug("EQUIP %s used by %d classes", equip, len(intervals))
+    logger.debug("=== CHAIN CONSTRAINTS ===")
+    for class_key, data in class_Usage_list.items():
+        logger.debug(
+            "CLASS %s | warmup_end=%d | %d equipment slots",
+            class_key,
+            data["warmup_end"],
+            len(data["items"])
+        )
 
     return solve_model(model, equip_intervals)
 
