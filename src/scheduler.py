@@ -159,9 +159,12 @@ def run_scheduler(day, classes, event_map):
         warmup_end = data["warmup_end"]
         window_end = data["window_end"]
 
-        #All slots must start at or after warmup end
+        #Slots must form a contiguous block within the window
+        #min(start) to max(end) == total_duration
+        #This combined with no_overlap prevents gaps
         for item in items:
-            model.add(items[0]["start"] >= warmup_end)
+            model.add(item["start"] >= warmup_end)
+            model.add(item["end"] <= window_end)
 
         # No overlap within the class -- slots can't run simultaneously
         if len(items) > 1: 
@@ -174,7 +177,19 @@ def run_scheduler(day, classes, event_map):
             for entry in equip_intervals
             if (entry["program"], entry["print_col"], entry["requested_time"]) == class_key
         )
-        model.add(sum(item["end"] - item["start"] for item in items) == total_duration)
+
+        #the block must be contiguous: span == total duration
+        #use auxiliary vars for min start and max end
+        starts = [item["start"] for item in items]
+        ends = [item["end"] for item in items]
+
+        min_start = model.new_int_var(warmup_end, window_end, f"min_start_{class_key}")
+        max_end = model.new_int_var(warmup_end, window_end, f"max_end{class_key}")
+
+        model.add_min_equality(min_start, starts)
+        model.add_max_equality(max_end, ends)
+
+        model.add(max_end - min_start == total_duration)
 
     logger.debug("=== MODEL SUMMARY ===")
     for entry in equip_intervals:
@@ -213,7 +228,13 @@ def solve_model(model, equip_intervals):
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         logger.warning("Cannot be solved: %s", solver.StatusName(status))
-        return {"status": "infeasible", "coaches": []}
+        # build unresolved schedule from raw requested times
+        unresolved = build_unresolved_schedule(equip_intervals)
+        return {
+            "status": "infeasible", 
+            "coaches": unresolved["coaches"],
+            "conflicts": unresolved["conflicts"]
+        }
 
     # Group equip_intervals by (print_col, requested_time) — one group per class
     from collections import defaultdict
@@ -250,7 +271,8 @@ def solve_model(model, equip_intervals):
             for t in range(warmup_start, warmup_end, 5):
                 coaches[print_col]["blocks"].append({
                     "time": to_time_str(t),
-                    "label": "WARM UP"
+                    "label": "WARM UP",
+                    "program": first_entry["program"]
                 })
             logger.debug(
                 "%s | col %s | WARM UP | %s --> %s",
@@ -270,7 +292,8 @@ def solve_model(model, equip_intervals):
             for t in range(start_min, end_min, 5):
                 coaches[print_col]["blocks"].append({
                     "time": to_time_str(t),
-                    "label": entry["equip"]
+                    "label": entry["equip"],
+                    "program": entry["program"]
                 })
 
         # 3. Add cooldown blocks for this class
@@ -280,7 +303,8 @@ def solve_model(model, equip_intervals):
             for t in range(cooldown_start, cooldown_end, 5):
                 coaches[print_col]["blocks"].append({
                     "time": to_time_str(t),
-                    "label": "COOL DOWN"
+                    "label": "COOL DOWN",
+                    "program": last_entry["program"]
                 })
             logger.debug(
                 "%s | col %s | COOL DOWN | %s --> %s",
@@ -289,6 +313,96 @@ def solve_model(model, equip_intervals):
             )
 
     return {"status": "ok", "coaches": list(coaches.values())}
+
+def build_unresolved_schedule(equip_intervals):
+    from collections import defaultdict
+
+    # Group by class
+    class_groups = defaultdict(list)
+    for entry in equip_intervals:
+        class_key = (entry["print_col"], entry["requested_time"], entry["program"])
+        class_groups[class_key].append(entry)
+
+    # Build schedule using requested start times — no solving
+    coaches = {}
+    equipment_time_usage = defaultdict(list)  # equip -> list of (start, end, program, print_col)
+
+    sorted_classes = sorted(
+        class_groups.items(),
+        key=lambda x: (x[0][0], x[0][1])
+    )
+
+    for (print_col, requested_time, program), entries in sorted_classes:
+        if print_col not in coaches:
+            coaches[print_col] = {"print_col": print_col, "blocks": []}
+
+        first_entry = entries[0]
+        warmup_start = first_entry["start_minutes"]
+        warmup_end = warmup_start + first_entry["warmup_time"]
+        cursor = warmup_end
+
+        # Add warmup
+        if first_entry["warmup_time"] > 0:
+            for t in range(warmup_start, warmup_end, 5):
+                coaches[print_col]["blocks"].append({
+                    "time": to_time_str(t),
+                    "label": "WARM UP",
+                    "program": program,
+                    "conflict": False
+                })
+
+        # Add equipment blocks sequentially from warmup end
+        for entry in entries:
+            start = cursor
+            end = cursor + entry["block_time"]
+
+            # Check if this equipment is already used at this time
+            conflict = False
+            for (existing_start, existing_end, existing_program, existing_col) in equipment_time_usage[entry["equip"]]:
+                if start < existing_end and existing_start < end:
+                    conflict = True
+                    break
+
+            equipment_time_usage[entry["equip"]].append(
+                (start, end, program, print_col)
+            )
+
+            for t in range(start, end, 5):
+                coaches[print_col]["blocks"].append({
+                    "time": to_time_str(t),
+                    "label": entry["equip"],
+                    "program": program,
+                    "conflict": conflict
+                })
+            cursor = end
+
+        # Add cooldown
+        if first_entry["cooldown_time"] > 0:
+            cooldown_end = cursor + first_entry["cooldown_time"]
+            for t in range(cursor, cooldown_end, 5):
+                coaches[print_col]["blocks"].append({
+                    "time": to_time_str(t),
+                    "label": "COOL DOWN",
+                    "program": program,
+                    "conflict": False
+                })
+
+    # Collect conflict descriptions
+    conflicts = []
+    for equip, usages in equipment_time_usage.items():
+        for i in range(len(usages)):
+            for j in range(i + 1, len(usages)):
+                a_start, a_end, a_prog, a_col = usages[i]
+                b_start, b_end, b_prog, b_col = usages[j]
+                if a_start < b_end and b_start < a_end:
+                    conflicts.append(
+                        f"{equip}: {a_prog} (col {a_col}) and "
+                        f"{b_prog} (col {b_col}) overlap"
+                    )
+
+    return {"coaches": list(coaches.values()), "conflicts": conflicts}
+
+
 
 if __name__ == "__main__":
     

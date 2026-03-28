@@ -48,3 +48,8 @@ main.py
 
 0.0.10
 - increase scheduler flexibility so equipment slots are not fixed, no overlap, contiguous
+
+0.0.11
+- added "program" parameter to class equipment for clearer identification in printed schedule
+- increased the input coverage to include an extra coach: read coach K, print column K
+- added function to print schedule as is if returned as infeasible and highlight conflicting equipment blocks
