@@ -29,7 +29,7 @@ scheduler.py
 - removed use of .xlsx file dependencies, relevant data will be part of the API payload
 - using chained equality to ensure first equipment slot starts exactly at warmup end
 - scheduler returns JSON dict instead of printing to console
-- output grouped in blocks of 5-min increments (best for apps script parsing)
+- output grouped in blocks of 5-min increments (best for apps script parsing) 
 main.py
 - added FastAPI endpoint POST /schedule
 - SheduleRequest model accepts payload parameters
@@ -53,3 +53,11 @@ main.py
 - added "program" parameter to class equipment for clearer identification in printed schedule
 - increased the input coverage to include an extra coach: read coach K, print column K
 - added function to print schedule as is if returned as infeasible and highlight conflicting equipment blocks
+
+0.0.12
+- restructured run_scheduler() into an iterative removal loop which attempts a full solve, 
+identifies and removes most conflicting class and retries until schedule is solved. 
+- added add_flagged_classes() to append removed classes to solved result as flagged class
+- added build_unresolved_schedule() as a fallback if schedule cannot be resolved 
+Apps Script
+- implemented a color system per equipment and error cells for quick and intuitive visual identification.
