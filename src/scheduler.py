@@ -24,29 +24,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("scheduler")
-#logger = logging.getLogger(__name__)
-'''
-#temp logger to bypass basicConfig conflict with uvicorn test enviro
-#get logger directly
-logger = logging.getLogger('scheduler')
-logger.setLevel(logging.DEBUG)
 
-#prevent duplicate handlers if module is reloaded
-if not logger.handlers:
-    #file handler
-    fh = logging.FileHandler(LOG_DIR / "scheduler.log")
-    fh.setLevel(logging.DEBUG)
-    #terminal handler
-    sh = logging.StreamHandler()
-    sh.setLevel(logging.DEBUG)
-    #Formatter
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    fh.setFormatter(fmt)
-    sh.setFormatter(fmt)
-    logger.addHandler(fh)
-    logger.addHandler(sh)
-'''
-#------------------------------------------------------------------
 
 def to_time_str(minutes):
     h = minutes // 60
@@ -72,9 +50,18 @@ def run_scheduler(day, classes, event_map):
         if result["status"] == "ok":
             if flagged:
                 result = add_flagged_classes(result, flagged, program_equipment)
-                result["conflicts"] = [
-                    f"{c['program']} (col {c['print_col']}) "
-                    f"could not be scheduled — equipment conflict"
+                conflict_msgs = []
+                for coach in result["coaches"]:
+                    for block in coach["blocks"]:
+                        if block.get("conflict") and block.get("conflict_with"):
+                            msg = (
+                                f"{block['program']} (col {coach['print_col']}): "
+                                f"{block['label']} conflicts with {block['conflict_with']}"
+                            )
+                            if msg not in conflict_msgs:
+                                conflict_msgs.append(msg)
+                result["conflicts"] = conflict_msgs or [
+                    f"{c['program']} (col {c['print_col']}) could not be scheduled — equipment conflict"
                     for c in flagged
                 ]
             return result
@@ -131,9 +118,21 @@ def find_most_conflicting(classes, program_equipment):
 
 
 def add_flagged_classes(result, flagged, program_equipment):
-    # Add flagged classes to the result as red-flagged blocks
-    # placed at their requested time in sequential order
     coaches = {c["print_col"]: c for c in result["coaches"]}
+
+    # Build a map of already-scheduled equipment usage: equip -> list of (start_min, end_min, program)
+    scheduled_usage = {}
+    for coach in result["coaches"]:
+        cursor = None
+        for block in coach["blocks"]:
+            if block["label"] in ("WARM UP", "COOL DOWN"):
+                continue
+            t = int(block["time"].replace(":", ""))
+            # Convert HHMM back to minutes
+            h, m = divmod(int(block["time"].split(":")[0]) * 60 + int(block["time"].split(":")[1]), 60)
+            t_min = int(block["time"].split(":")[0]) * 60 + int(block["time"].split(":")[1])
+            equip = block["label"]
+            scheduled_usage.setdefault(equip, []).append((t_min, t_min + 5, block["program"]))
 
     for entry in flagged:
         print_col = entry["print_col"]
@@ -149,7 +148,7 @@ def add_flagged_classes(result, flagged, program_equipment):
 
         cursor = start_minutes
 
-        # Warmup
+        # Warmup — never flagged
         if warmup_time > 0:
             for t in range(cursor, cursor + warmup_time, 5):
                 coaches[print_col]["blocks"].append({
@@ -160,18 +159,33 @@ def add_flagged_classes(result, flagged, program_equipment):
                 })
             cursor += warmup_time
 
-        # Equipment blocks — all flagged as conflict
+        # Equipment blocks — only flag if this specific block overlaps a scheduled class
         for equip in equipment_list:
-            for t in range(cursor, cursor + block_time, 5):
-                coaches[print_col]["blocks"].append({
+            block_start = cursor
+            block_end = cursor + block_time
+           
+            # Check if this equipment has any overlap with already-scheduled usage
+            usages = scheduled_usage.get(equip, [])
+            overlapping_programs = [
+                prog for (s, e, prog) in usages
+                if block_start < e and s < block_end
+            ]
+            is_conflict = len(overlapping_programs) > 0
+            conflicting_with = overlapping_programs[0] if overlapping_programs else None
+
+            for t in range(block_start, block_end, 5):
+                block = {
                     "time": to_time_str(t),
                     "label": equip,
                     "program": entry["program"],
-                    "conflict": True  # red
-                })
+                    "conflict": is_conflict
+                }
+                if conflicting_with:
+                    block["conflict_with"] = conflicting_with
+                coaches[print_col]["blocks"].append(block)
             cursor += block_time
 
-        # Cooldown
+        # Cooldown — never flagged
         if cooldown_time > 0:
             for t in range(cursor, cursor + cooldown_time, 5):
                 coaches[print_col]["blocks"].append({
@@ -181,11 +195,8 @@ def add_flagged_classes(result, flagged, program_equipment):
                     "conflict": False
                 })
 
-    # Sort blocks within each coach by time
     for print_col, coach_data in coaches.items():
-        coach_data["blocks"].sort(
-            key=lambda b: int(b["time"].replace(":", ""))
-        )
+        coach_data["blocks"].sort(key=lambda b: int(b["time"].replace(":", "")))
 
     result["coaches"] = list(coaches.values())
     return result

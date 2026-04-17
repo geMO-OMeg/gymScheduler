@@ -1,6 +1,7 @@
 Constraint Scheduling Engine
 
 Project Overview
+
 An automated scheduling system for a gymnastics facility that generates coach schedules 
 by resolving scheduling conflicts. The system integrates a Google Sheets frontend with a 
 cloud-based FastAPI backend running a OR-Tools CP-SAT solver.  The result is written back 
@@ -102,14 +103,8 @@ Deployment
 
 
 Design Goals: Next Steps / Open Questions / Future Work
-  * TEST: Iterative removal loop -- just implemented, not yet tested. Verify
-    with a known infeasible configuration (e.g. KINDER+ equipment conflict).
-  * Saturday schedule -- isMorning and startHour=9 implemented. Needs full
-    end-to-end test after iterative removal is verified.
   * Coach overlap constraint -- currently caught by Apps Script validation only.
     Discussed adding to solver as a future constraint.
-  * Infeasibility UX -- alert shows removed classes and why. Red cells show
-    conflict location. Consider improving manager guidance messaging.
   * Conflict detection -- pre-solve overlap math used currently. Solver
     infeasibility core not yet implemented (future optimization).
   * Auth on backend -- open endpoint; add API key or Google Cloud IAP before

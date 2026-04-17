@@ -61,3 +61,7 @@ identifies and removes most conflicting class and retries until schedule is solv
 - added build_unresolved_schedule() as a fallback if schedule cannot be resolved 
 Apps Script
 - implemented a color system per equipment and error cells for quick and intuitive visual identification.
+
+0.0.13
+- changed add_flagged_classes() from whole-class to per-equipment-block flagging for easy visual identification within the printed schedule
+- updated README
