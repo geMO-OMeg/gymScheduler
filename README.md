@@ -103,16 +103,12 @@ Deployment
 
 
 Design Goals: Next Steps / Open Questions / Future Work
-  * Coach overlap constraint -- currently caught by Apps Script validation only.
-    Discussed adding to solver as a future constraint.
-  * Conflict detection -- pre-solve overlap math used currently. Solver
-    infeasibility core not yet implemented (future optimization).
+  
   * Auth on backend -- open endpoint; add API key or Google Cloud IAP before
     production deployment.
   * Multi-day state -- each day solved independently. Cross-day constraints
-    not designed.
-  * Student rosters -- planned future input, not yet designed.
-  * Attendance sheets -- planned output. Separate function from solver.
+    not designed and may not be needed.
+  * Attendance sheets -- planned output from apps script. Separate function from solver.
   * Code cleanup -- full optimization pass planned after all requirements met.
 
 

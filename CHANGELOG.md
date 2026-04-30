@@ -65,3 +65,9 @@ Apps Script
 0.0.13
 - changed add_flagged_classes() from whole-class to per-equipment-block flagging for easy visual identification within the printed schedule
 - updated README
+
+0.0.14
+- remove Pydantic model from main.py to reflect more complex 2 dict structure, add ping function
+- added constraint and helper method to prevent multiple classes sharing the same MINI and FR rooms
+- added constraint and helper method to group equipment blocks within the same room for young child classes 
+- added constraint and helper method to add break blocks midway through competitive classes
