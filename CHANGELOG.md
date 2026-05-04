@@ -71,3 +71,6 @@ Apps Script
 - added constraint and helper method to prevent multiple classes sharing the same MINI and FR rooms
 - added constraint and helper method to group equipment blocks within the same room for young child classes 
 - added constraint and helper method to add break blocks midway through competitive classes
+
+0.0.15
+- fixed scheduling bug when assigning breaks to competitive classes

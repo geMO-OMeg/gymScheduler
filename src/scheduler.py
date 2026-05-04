@@ -57,6 +57,9 @@ COMPETITIVE_PROGRAMS = {
 }
 
 def is_competitive_program(program):
+    name = program.strip().upper()
+#    logger.debug("is_competitive check: input='%s' | cleaned='%s' | result=%s",
+#                 program, name, name in COMPETITIVE_PROGRAMS)
     return program.strip().upper() in COMPETITIVE_PROGRAMS
 
 
@@ -247,6 +250,7 @@ def attempt_solve(classes, program_equipment):
     room_usage = {}
     class_usage_list = {}
     break_deviations = []
+    BREAK_CONSTRAINT_ENABLED = False # temp debug flag
 
     for entry in classes:
         program = entry["program"].strip().upper()
@@ -261,21 +265,17 @@ def attempt_solve(classes, program_equipment):
         if not equipment_list:
             logger.warning("No equipment found for program: %s", program)
             continue
-
-        #logger.debug(
-        #    "Processing %s | col %s | start=%d | warmup=%d | block=%d | cooldown=%d",
-        #    program, print_col, start_minutes, warmup_time, block_time, cooldown_time
-        #)
+        
+        logger.debug(
+            "ENTRY | program=%s | print_col=%s | start_minutes=%d (%s) | warmup=%d | block=%d | cooldown=%d",
+            program, print_col, start_minutes, to_time_str(start_minutes),
+            warmup_time, block_time, cooldown_time
+        )
 
         n = len(equipment_list)
         window_start = start_minutes + warmup_time
         break_duration = 15 if is_competitive_program(program) else 0
         window_end = window_start + (block_time * n) + break_duration
-
-        #logger.debug(
-        #    "PROGRAM %s | equipment_list: %s | n: %d | window_start: %d | window_end: %d",
-        #    program, equipment_list, n, window_start, window_end
-        #)
 
         class_key = (program, print_col, requested_time)
         class_usage_list[class_key] = {
@@ -333,106 +333,116 @@ def attempt_solve(classes, program_equipment):
                 "end": end_var,
             })
 
-    # Equipment grouping constraint — mini must not be sandwiched
-    if is_mini_room_program(program) and len(class_usage_list[class_key]["items"]) > 1:
-        mini_items = [
-            item for item, equip in zip(
-                class_usage_list[class_key]["items"], equipment_list
-            )
-            if get_room(equip) == "mini_room"
-        ]
-        non_mini_items = [
-            item for item, equip in zip(
-                class_usage_list[class_key]["items"], equipment_list
-            )
-            if get_room(equip) != "mini_room"
-        ]
+        # Equipment grouping constraint — mini must not be sandwiched
+        if is_mini_room_program(program) and len(class_usage_list[class_key]["items"]) > 1:
+            mini_items = [
+                item for item, equip in zip(
+                    class_usage_list[class_key]["items"], equipment_list
+                )
+                if get_room(equip) == "mini_room"
+            ]
+            non_mini_items = [
+                item for item, equip in zip(
+                    class_usage_list[class_key]["items"], equipment_list
+                )
+                if get_room(equip) != "mini_room"
+            ]
 
-        if mini_items and non_mini_items:
-            # Boolean: True = mini first, False = non-mini first
-            mini_first = model.new_bool_var(f"mini_first_{program}_{print_col}")
+            if mini_items and non_mini_items:
+                # Boolean: True = mini first, False = non-mini first
+                mini_first = model.new_bool_var(f"mini_first_{program}_{print_col}")
 
-            mini_max_end = model.new_int_var(
-                window_start, window_end, f"mini_max_end_{program}_{print_col}"
-            )
-            non_mini_max_end = model.new_int_var(
-                window_start, window_end, f"non_mini_max_end_{program}_{print_col}"
-            )
-            mini_min_start = model.new_int_var(
-                window_start, window_end, f"mini_min_start_{program}_{print_col}"
-            )
-            non_mini_min_start = model.new_int_var(
-                window_start, window_end, f"non_mini_min_start_{program}_{print_col}"
+                mini_max_end = model.new_int_var(
+                    window_start, window_end, f"mini_max_end_{program}_{print_col}"
+                )
+                non_mini_max_end = model.new_int_var(
+                    window_start, window_end, f"non_mini_max_end_{program}_{print_col}"
+                )
+                mini_min_start = model.new_int_var(
+                    window_start, window_end, f"mini_min_start_{program}_{print_col}"
+                )
+                non_mini_min_start = model.new_int_var(
+                    window_start, window_end, f"non_mini_min_start_{program}_{print_col}"
+                )
+
+                model.add_max_equality(mini_max_end, [i["end"] for i in mini_items])
+                model.add_max_equality(non_mini_max_end, [i["end"] for i in non_mini_items])
+                model.add_min_equality(mini_min_start, [i["start"] for i in mini_items])
+                model.add_min_equality(non_mini_min_start, [i["start"] for i in non_mini_items])
+
+                # If mini_first: all mini ends <= all non-mini starts
+                model.add(mini_max_end <= non_mini_min_start).only_enforce_if(mini_first)
+                # If not mini_first: all non-mini ends <= all mini starts
+                model.add(non_mini_max_end <= mini_min_start).only_enforce_if(mini_first.Not())
+
+                logger.debug(
+                    "Grouping constraint added for %s | col %s", program, print_col
+                )
+
+        #Break constraint for competitive classes
+
+        if is_competitive_program(program):
+            break_duration = 15
+            logger.debug(
+                "COMP WINDOW | %s | window_start=%d (%s) | window_end=%d (%s) | block_time=%d | n=%d | total_blocks=%d | break=15 | available=%d",
+                program, window_start, to_time_str(window_start),
+                window_end, to_time_str(window_end),
+                block_time, n, block_time * n,
+                window_end - window_start - (block_time * n)
             )
 
-            model.add_max_equality(mini_max_end, [i["end"] for i in mini_items])
-            model.add_max_equality(non_mini_max_end, [i["end"] for i in non_mini_items])
-            model.add_min_equality(mini_min_start, [i["start"] for i in mini_items])
-            model.add_min_equality(non_mini_min_start, [i["start"] for i in non_mini_items])
+            #Break interval is movable within class window
+            break_start = model.new_int_var(
+                window_start,
+                window_end - break_duration,
+                f"break_start_{program}_{print_col}"
+            )
+            break_end = model.new_int_var(
+                window_start + break_duration,
+                window_end,
+                f"break_end_{program}_{print_col}"
+            )
+            break_interval = model.new_interval_var(
+                break_start,
+                break_duration,
+                break_end,
+                f"break_interval{program}_{print_col}"
+            )
 
-            # If mini_first: all mini ends <= all non-mini starts
-            model.add(mini_max_end <= non_mini_min_start).only_enforce_if(mini_first)
-            # If not mini_first: all non-mini ends <= all mini starts
-            model.add(non_mini_max_end <= mini_min_start).only_enforce_if(mini_first.Not())
+            #Break cannot overlap any equipment block
+            items = class_usage_list[class_key]["items"]
+            model.add_no_overlap([item["interval"] for item in items] + [break_interval])
+
+            #Hard constraint 1: at least 1 equipment block before break
+            model.add(break_start >= window_start + block_time)
+
+            #Hard constraint 2: at least 1 block after break
+            model.add(break_end <= window_end - block_time)
+
+            #Soft preference: break prefers to start at class midpoint
+            midpoint = window_start + (block_time * len(equipment_list)) // 2
+            deviation = model.new_int_var(
+                0,
+                window_end - window_start,
+                f"break_deviation_{program}_{print_col}"
+            )
+            model.add_abs_equality(deviation, break_start - midpoint)
+            break_deviations.append(deviation)
+
+            #Store break for output
+            class_usage_list[class_key]["break"] = {
+                "start": break_start,
+                "end": break_end
+            }
 
             logger.debug(
-                "Grouping constraint added for %s | col %s", program, print_col
+                "Break constraint added for %s | col %s | midpoint=%s",
+                program, print_col, to_time_str(midpoint)
             )
-
-    #Break constraint for competitive classes
-    if is_competitive_program(program):
-        break_duration = 15
-
-        #Break interval is movable within class window
-        break_start = model.new_int_var(
-            window_start,
-            window_end - break_duration,
-            f"break_start_{program}_{print_col}"
-        )
-        break_end = model.new_int_var(
-            window_start + break_duration,
-            window_end,
-            f"break_end_{program}_{print_col}"
-        )
-        break_interval = model.new_interval_var(
-            break_start,
-            break_duration,
-            break_end,
-            f"break_interval{program}_{print_col}"
-        )
-
-        #Break cannot overlap any equipment block
-        items = class_usage_list[class_key]["items"]
-        model.add_no_overlap([item["interval"] for item in items] + [break_interval])
-
-        #Hard constraint 1: at least 1 equipment block must end before break starts
-        #Use earliest possible end of any single block as proxy (break_start must be >= 1 full block before it):
-        model.add(break_start >= window_end - block_time)
-
-        #Soft preference: break prefers to start at class midpoint
-        midpoint = window_start + (block_time * len(equipment_list)) // 2
-        deviation = model.new_int_var(
-            0,
-            window_end - window_start,
-            f"break_deviation_{program}_{print_col}"
-        )
-        model.add_abs_equality(deviation, break_start - midpoint)
-        break_deviations.append(deviation)
-
-        #Store break for output
-        class_usage_list[class_key]["break"] = {
-            "start": break_start,
-            "end": break_end
-        }
-
-        logger.debug(
-            "Break constraint added for %s | col %s | midpoint=%s",
-            program, print_col, to_time_str(midpoint)
-        )
     
-    # Minimize sum of all break deviations from midpoint
-    #if break_deviations:
-    #    model.minimize(sum(break_deviations))
+    # Minimize break deviations from midpoint
+    if break_deviations and BREAK_CONSTRAINT_ENABLED:
+        model.minimize(sum(break_deviations))
 
     # Cross-class equipment conflict constraint
     for equip, intervals in equip_usage.items():
@@ -440,9 +450,10 @@ def attempt_solve(classes, program_equipment):
             model.add_no_overlap(intervals)
 
     #room-level conflict constraint -- no 2 classes in the same room simultaneously
-    for room, intervals in room_usage.items():
-        if len(intervals) >1:
-            model.add_no_overlap(intervals)
+    #for room, intervals in room_usage.items():
+    #    if len(intervals) >1:
+    #        logger.debug("Room constraint: %s has %d intervals", room, len(intervals))
+    #        model.add_no_overlap(intervals)
 
     # Intra-class constraints
     for class_key, data in class_usage_list.items():
@@ -471,24 +482,19 @@ def attempt_solve(classes, program_equipment):
 
         model.add_min_equality(min_start, starts)
         model.add_max_equality(max_end, ends)
-        model.add(max_end - min_start == total_duration)
+        prog_name = class_key[0]
+        beak_allowance = 15 if is_competitive_program(prog_name) else 0
+        #model.add(max_end - min_start == total_duration + beak_allowance)
 
-        logger.debug("Classes in this solve attempt: %s", [
-            (e["program"], e["print_col"]) for e in equip_intervals
-        ])
-        logger.debug("Break deviations count: %d", len(break_deviations))
-        for class_key, data in class_usage_list.items():
-            if "break" in data:
-                logger.debug(
-                    "break for %s | window_start=%d window_end=%d block_time=%d n=%d",
-                    class_key,
-                    data["warmup_end"],
-                    data["window_end"],
-                    # need block_time from equip_intervals
-                    next(e["block_time"] for e in equip_intervals
-                         if (e["program"], e["print_col"], e["requested_time"]) == class_key),
-                         len(data["items"])
-                )
+        prog_name = class_key[0]
+        if is_competitive_program(prog_name) and "break" in data:
+            model.add(max_end - min_start == total_duration + 15)
+            break_info = data["break"]
+            model.add(break_info["start"] >= min_start)
+            model.add(break_info["end"] <= max_end)
+        else:
+            model.add(max_end - min_start == total_duration)
+            
 
     return solve_model(model, equip_intervals, class_usage_list)
 
@@ -637,11 +643,6 @@ def solve_model(model, equip_intervals, class_usage_list=None):
                     "label": "WARM UP",
                     "program": first_entry["program"]
                 })
-            #logger.debug(
-            #    "%s | col %s | WARM UP | %s --> %s",
-            #    first_entry["program"], print_col,
-            #    to_time_str(warmup_start), to_time_str(warmup_end)
-            #)
 
         # 2. Add equipment blocks for this class in solved order
         for entry in entries_sorted:
@@ -667,20 +668,39 @@ def solve_model(model, equip_intervals, class_usage_list=None):
             entries_sorted[0]["print_col"],
             entries_sorted[0]["requested_time"]
         )
+
+        logger.debug("looking up break | usage_key=%s | keys in class_usage_list=%s",
+                     usage_key, list(class_usage_list.keys()))
+
         break_data = class_usage_list.get(usage_key, {}).get("break")
+
+        logger.debug("break_data found: %s", break_data is not None)
+        logger.debug("BREAK CHECK | usage_key=%s | break_data=%s",
+                     usage_key, break_data is not None)
+
         if break_data:
-            b_start = solver.Value(break_data["start"])
-            b_end = solver.Value(break_data["end"])
-            for t in range(b_start, b_end, 5):
-                coaches[print_col]["blocks"].append({
-                    "time": to_time_str(t),
-                    "label": "BREAK",
-                    "program": entries_sorted[0]["program"]
-                })
+            try:
+                b_start = solver.Value(break_data["start"])
+                b_end = solver.Value(break_data["end"])
+                logger.debug("BREAK OUTPUT | %s --> %s",
+                            to_time_str(b_start), to_time_str(b_end))
+                for t in range(b_start, b_end, 5):
+                    coaches[print_col]["blocks"].append({
+                        "time": to_time_str(t),
+                        "label": "BREAK",
+                        "program": entries_sorted[0]["program"]
+                    })
+            except Exception as e:
+                logger.error("BREAK VALUE ERROR | %s", str(e))
 
         # 3. Add cooldown blocks for this class
         if last_entry["cooldown_time"] > 0:
-            cooldown_start = solver.Value(last_entry["end"])
+            if break_data:
+                b_end_val = solver.Value(break_data["end"])
+                cooldown_start = max(solver.Value(last_entry["end"]), b_end_val)
+            else:
+                cooldown_start = solver.Value(last_entry["end"])
+                                     
             cooldown_end = cooldown_start + last_entry["cooldown_time"]
             for t in range(cooldown_start, cooldown_end, 5):
                 coaches[print_col]["blocks"].append({
@@ -688,11 +708,9 @@ def solve_model(model, equip_intervals, class_usage_list=None):
                     "label": "COOL DOWN",
                     "program": last_entry["program"]
                 })
-            #logger.debug(
-            #    "%s | col %s | COOL DOWN | %s --> %s",
-            #    last_entry["program"], print_col,
-            #    to_time_str(cooldown_start), to_time_str(cooldown_end)
-            #)
+
+    for print_col, coach_data in coaches.items():
+        coach_data["blocks"].sort(key=lambda b: b["time"])
 
     return {"status": "ok", "coaches": list(coaches.values())}
 

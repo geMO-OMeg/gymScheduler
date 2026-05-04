@@ -1,125 +1,70 @@
 Constraint Scheduling Engine
 
 Project Overview
-
-An automated scheduling system for a gymnastics facility that generates coach schedules 
-by resolving scheduling conflicts. The system integrates a Google Sheets frontend with a 
-cloud-based FastAPI backend running a OR-Tools CP-SAT solver.  The result is written back 
-to Google Sheets, giving program managers a clear view of assignments.
+An automated scheduling system for a gymnastics facility that assigns classes
+to equipment time slots, resolves equipment conflicts, and writes formatted
+daily schedules back to Google Sheets.
 
 Tech Stack
-Python  
-Google 
-OR-Tools  
-Google Sheets  
-Apps Script  
-JSON 
-APIs  
-Google Cloud
+Python | Google OR-Tools | Google Sheets | Apps Script | JSON APIs | Google Cloud Run
 
-Current Status:
-- Solver logic (layer 3) under active development
-- Apps Script data pipeline (layer 2) tested and running
-- Google Sheets UI is built and running. Final aesthetic touches still needed.
-- Layer 4 is built and running but still requires PDF generation.
+Current Status
+- Solver logic (layer 3): under active development
+- Apps Script data pipeline (layer 2): tested and running
+- Google Sheets UI (layer 1): built and running, final aesthetic touches pending
+- Output formatter (layer 4): built and running, PDF generation not yet implemented
 
 System Architecture
-The system is divided into 4 layers:
 
 Layer 1 -- Google Sheets UI
-Program managers enter class assignments and coach assignments. Coaches view
-printed daily schedules. Output columns D-K are written by the backend and
-treated as read-only.
+Program managers enter class and coach assignments. Output columns D-K are
+written by the backend and treated as read-only. Each weekday has two sheets
+(e.g. Monday 1 / Monday 2) representing Week A and Week B schedules.
 
 Layer 2 -- Apps Script
-Reads input columns A and B per sheet (1 sheet per day of the week). Validates
-data before sending. Packages data as JSON, sends HTTPS POST to backend.
-Receives JSON response and writes schedule to output columns.
+Reads input columns A/B per sheet. Validates entries and coach overlaps before
+sending. Packages rec and competitive classes into a dual-sheet JSON payload,
+sends HTTPS POST to backend. Receives result.A and result.B and writes each
+to the corresponding sheet. Dynamic startHour ensures early-starting classes
+(e.g. competitive warmups) are not clipped by the sheet grid.
 
 Layer 3 -- Python / FastAPI Backend (Cloud Run)
-Receives JSON payload, runs OR-Tools CP-SAT solver to resolve equipment
-conflicts. Returns structured JSON schedule. Implements iterative removal loop:
-removes the most conflicting class and retries until a feasible solution is
-found, then re-adds removed classes as red-flagged blocks.
+Receives JSON payload, runs OR-Tools CP-SAT solver. Returns structured JSON.
+
+Solver behaviour:
+- Iterative removal loop: removes most conflicting class, retries until feasible,
+  re-adds removed classes as red-flagged blocks
+- Room constraints: no two classes share mini room or FR room simultaneously
+- Equipment grouping: mini equipment must be contiguous (mini-mini-large or
+  large-mini-mini, never mini-large-mini) for young rec classes
+- Competitive breaks: 15-minute moveable break interval per competitive class,
+  never first or last block, soft preference for midpoint placement
+- Contiguous block constraint: equipment blocks within a class have no gaps
+  (break duration explicitly accounted for in competitive class windows)
+- No two classes use the same equipment simultaneously
+- Solver time limit: 10 seconds with iterative removal fallback
 
 Layer 4 -- Output Formatter
-Maps solver output to per-coach, per-timeslot labels. Written back to Google
-Sheets by Apps Script. Color-coded to enable quick and intuitive visual identification.
+Maps solver output to per-coach, per-timeslot labels. Written to Google Sheets
+by Apps Script. Color-coded by equipment for visual identification.
 Future: attendance sheets, coach schedule PDFs.
 
-
-Scheduler Logic (scheduler.py)
-Key functions:
-  run_scheduler()          Main entry point. Iterative removal loop -- removes
-                           most conflicting class and retries until feasible.
-  attempt_solve()          Builds CP-SAT model and calls solve_model(). Returns
-                           full coaches response or {status: infeasible}.
-  find_most_conflicting()  Counts equipment conflicts per class using time window
-                           overlap detection. Uses window size as tiebreaker.
-  add_flagged_classes()    Re-adds removed classes as red blocks at requested
-                           times, sorted chronologically.
-  solve_model()            Runs CP-SAT solver (10s timeout). Builds warmup /
-                           equipment / cooldown blocks per class.
-  build_unresolved_schedule()  Fallback for total infeasibility. Places all
-                               classes sequentially, flags overlaps red.
-
-Solver Constraints:
-  - Equipment slots start >= warmup_end and end <= window_end for their class
-  - No two slots within the same class overlap (add_no_overlap)
-  - Contiguous block constraint: max_end - min_start == total_duration (no gaps)
-  - No two classes use the same equipment simultaneously
-  - Solver time limit: 10 seconds
-
-
-Apps Script (Layer 2)
-Key functions:
-  generateMonday() ... generateSaturday()   Entry points per sheet button.
-  generateForDay(dayName)                   Main orchestrator.
-  validateClassEntries(rawValues)           Blocks submission on missing time or
-                                            program.
-  validateCoachOverlaps(classes, event_map) Blocks submission on same-coach
-                                            overlapping classes.
-  parseTimeSlot(raw, isMorning)             Parses '4:15 -- 10╇10╇5' into
-                                            start_minutes, warmup, block,
-                                            cooldown. Handles AM/PM.
-  readInputSheet(sheet, isMorning)          Reads cols A/B up to MAX_ROW=42.
-  readEventMap(ss)                          Reads event_map sheet.
-  writeScheduleToSheet(sheet, result,       Clears cols D-K rows 2-201. Writes
-    startHour)                              label+program, colors by equipment.
-  timeToRow(timeStr, startHour)             Converts time string to sheet row.
-  warmUpBackend()                           Pings /ping to prevent cold start.
-
-Saturday is a morning schedule (9am-2pm). isMorning flag is set when
-dayName === 'Saturday' and controls time parsing and row mapping.
-
-
 Deployment
-  Platform:   Google Cloud Run -- pay per request, scales to zero when idle
-  Container:  Docker image pushed to gcr.io/[project-id]/gym-scheduler
-  Redeploy:   ./deploy.sh (docker build + push + gcloud run deploy)
-  Logs:       Cloud Run console (StreamHandler only, no file logging)
-  Auth:       Currently open (--allow-unauthenticated) -- add auth before
-              production handoff
+Platform:   Google Cloud Run (pay per request, scales to zero)
+Container:  Docker image → gcr.io/[project-id]/gym-scheduler
+Redeploy:   ./deploy.sh (docker build + push + gcloud run deploy)
+Logs:       Cloud Run console (StreamHandler, DEBUG level)
+Auth:       Currently open — add IAP or API key before production
 
-
-Design Goals: Next Steps / Open Questions / Future Work
-  
-  * Auth on backend -- open endpoint; add API key or Google Cloud IAP before
-    production deployment.
-  * Multi-day state -- each day solved independently. Cross-day constraints
-    not designed and may not be needed.
-  * Attendance sheets -- planned output from apps script. Separate function from solver.
-  * Code cleanup -- full optimization pass planned after all requirements met.
-
-
-Error Handling (Hybrid)
-  Apps Script:
-    - validateClassEntries: blocks if program is missing time or vice versa
-    - validateCoachOverlaps: blocks if same coach has overlapping classes
-    - Conflict alert popup when backend returns removed classes
-    - Cell highlighting for conflicts (red #FF4444)
-    - Dropdown menus for times and class programs
-  Backend:
-    - Iterative removal produces a partial feasible schedule rather than failing
-    - build_unresolved_schedule() handles total infeasibility as final fallback
-    - Named logger 'scheduler' with DEBUG level, StreamHandler for Cloud Run
+Next Steps
+- Comp vault / BG Floor priority for competitive classes
+- 8 HR XCEL / Laurelettes BG Floor sharing with rec classes
+- Tots/BBYS vs Kinder simultaneous warning in Apps Script
+- Saturday 1:45pm cutoff validation
+- Conditioning blocks (manager-flagged, weekly awareness)
+- Cross-sheet rec class assignment swap (solver-driven Week A/B placement)
+- Lock/freeze system for post-notification schedule changes
+- Attendance sheet generation
+- Backend auth before production handoff
+- PDF generation for coach schedules
+- Full code cleanup pass
