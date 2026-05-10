@@ -74,3 +74,6 @@ Apps Script
 
 0.0.15
 - fixed scheduling bug when assigning breaks to competitive classes
+
+0.0.16 
+- added constraint to prioritize specific equipment for competitive classes

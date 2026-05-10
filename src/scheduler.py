@@ -248,8 +248,10 @@ def attempt_solve(classes, program_equipment):
     equip_intervals = []
     equip_usage = {}
     room_usage = {}
+    bg_floor_usage = {"restricted_comp": [], "shared_comp": [], "rec": []}
     class_usage_list = {}
     break_deviations = []
+    priority_deviations = []
     BREAK_CONSTRAINT_ENABLED = False # temp debug flag
 
     for entry in classes:
@@ -439,10 +441,31 @@ def attempt_solve(classes, program_equipment):
                 "Break constraint added for %s | col %s | midpoint=%s",
                 program, print_col, to_time_str(midpoint)
             )
+
+            # Soft preference - comp vault and BG Floor scheduled as early as possible
+            PRIORITY_EQUIPMENT = {"COMP VAULT", "BG FLOOR"}
+            for item, equip in zip(class_usage_list[class_key]["items"], equipment_list):
+                if equip.strip().upper() in PRIORITY_EQUIPMENT:
+                    prio_deviation = model.new_int_var(
+                        0,
+                        window_end - window_start,
+                        f"prio_def_{program}_{print_col}_{equip}"
+                    )
+                    model.add(prio_deviation == item["start"] - window_start)
+                    priority_deviations.append(prio_deviation)
+                    logger.debug(
+                        "Priority preference added for %s | %s | col %s",
+                        equip, program, print_col
+                    )
     
     # Minimize break deviations from midpoint
-    if break_deviations and BREAK_CONSTRAINT_ENABLED:
-        model.minimize(sum(break_deviations))
+    all_deviations = []
+    if break_deviations:
+        all_deviations.extend(break_deviations)
+    if priority_deviations:
+        all_deviations.extend([2 * d for d in priority_deviations])
+    if all_deviations:
+        model.minimize(sum(all_deviations))
 
     # Cross-class equipment conflict constraint
     for equip, intervals in equip_usage.items():
