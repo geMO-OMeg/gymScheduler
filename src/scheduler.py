@@ -244,6 +244,16 @@ def add_flagged_classes(result, flagged, program_equipment):
 
 
 def attempt_solve(classes, program_equipment):
+    """
+    Builds and solves the CP-SAT model for a single day schedule.
+    
+    Args:
+        classes: list of class dicts from Apps Script payload
+        program_equipment: dict mapping program name -> list of equipment
+    
+    Returns:
+        dict with status, coaches, and optional conflicts
+    """
     model = cp_model.CpModel()
     equip_intervals = []
     equip_usage = {}
@@ -252,7 +262,6 @@ def attempt_solve(classes, program_equipment):
     class_usage_list = {}
     break_deviations = []
     priority_deviations = []
-    BREAK_CONSTRAINT_ENABLED = False # temp debug flag
 
     for entry in classes:
         program = entry["program"].strip().upper()
@@ -267,7 +276,7 @@ def attempt_solve(classes, program_equipment):
         if not equipment_list:
             logger.warning("No equipment found for program: %s", program)
             continue
-        
+
         logger.debug(
             "ENTRY | program=%s | print_col=%s | start_minutes=%d (%s) | warmup=%d | block=%d | cooldown=%d",
             program, print_col, start_minutes, to_time_str(start_minutes),
@@ -286,199 +295,410 @@ def attempt_solve(classes, program_equipment):
             "items": []
         }
 
-        for equip in equipment_list:
-            duration = block_time
-            
-            #Guard: skip if window is too small for this equipment block
-            if window_end - duration < window_start:
-                logger.warning("Window too small for %s | %s | window_start=%d window_end=%d duration=%d",
-                               program, equip, window_start, window_end, duration
-                )
-                continue
+        # Build interval variables for each equipment block
+        _build_equipment_intervals(
+            model, entry, program, print_col, requested_time,
+            equipment_list, block_time, window_start, window_end,
+            equip_usage, room_usage, bg_floor_usage,
+            class_usage_list, class_key, equip_intervals
+        )
 
-            start_var = model.new_int_var(
-                window_start,
-                window_end - duration,
-                f"start_{program}_{print_col}_{equip}"
+        # Per-class constraints
+        _apply_grouping_constraint(
+            model, program, print_col, equipment_list,
+            class_usage_list, class_key, window_start, window_end
+        )
+
+        _apply_break_constraint(
+            model, program, print_col, equipment_list,
+            block_time, n, window_start, window_end,
+            class_usage_list, class_key,
+            break_deviations, priority_deviations
+        )
+
+    # Cross-class constraints
+    _apply_equipment_conflict_constraints(model, equip_usage)
+    _apply_room_constraints(model, room_usage)
+    _apply_bg_floor_sharing_constraints(model, bg_floor_usage)
+
+    # Intra-class constraints
+    _apply_intra_class_constraints(
+        model, class_usage_list, equip_intervals
+    )
+
+    # Objective
+    _apply_objective(model, break_deviations, priority_deviations)
+
+    return solve_model(model, equip_intervals, class_usage_list)
+
+
+# ── Interval building ──────────────────────────────────────────────────────────
+
+def _build_equipment_intervals(
+    model, entry, program, print_col, requested_time,
+    equipment_list, block_time, window_start, window_end,
+    equip_usage, room_usage, bg_floor_usage,
+    class_usage_list, class_key, equip_intervals
+):
+    """
+    Creates CP-SAT interval variables for each equipment block in a class
+    and registers them in equip_usage, room_usage, bg_floor_usage,
+    class_usage_list, and equip_intervals.
+
+    Args:
+        model: CP-SAT model
+        entry: raw class dict from payload
+        program: uppercase program name
+        print_col: coach column letter
+        requested_time: time string from Apps Script
+        equipment_list: list of equipment names for this program
+        block_time: duration in minutes per equipment block
+        window_start: earliest start minute for equipment blocks
+        window_end: latest end minute for equipment blocks
+        equip_usage: dict mapping equipment name -> list of intervals
+        room_usage: dict mapping room name -> list of intervals
+        bg_floor_usage: dict with restricted_comp/shared_comp/rec interval lists
+        class_usage_list: dict mapping class_key -> class data
+        class_key: tuple (program, print_col, requested_time)
+        equip_intervals: flat list of all interval dicts across all classes
+
+    Returns:
+        None — mutates all passed dicts/lists in place
+    """
+    for equip in equipment_list:
+        duration = block_time
+
+        if window_end - duration < window_start:
+            logger.warning(
+                "Window too small for %s | %s | window_start=%d window_end=%d duration=%d",
+                program, equip, window_start, window_end, duration
             )
-            end_var = model.new_int_var(
-                window_start + duration,
-                window_end,
-                f"end_{program}_{print_col}_{equip}"
-            )
-            interval = model.new_interval_var(
-                start_var,
-                duration,
-                end_var,
-                f"interval_{program}_{print_col}_{equip}"
-            )
+            continue
 
-            equip_usage.setdefault(equip, []).append(interval)
-            room = get_room(equip)
-            room_usage.setdefault(room, []).append(interval)
-            class_usage_list[class_key]["items"].append({
-                "start": start_var,
-                "end": end_var,
-                "interval": interval
-            })
+        start_var = model.new_int_var(
+            window_start,
+            window_end - duration,
+            f"start_{program}_{print_col}_{equip}"
+        )
+        end_var = model.new_int_var(
+            window_start + duration,
+            window_end,
+            f"end_{program}_{print_col}_{equip}"
+        )
+        interval = model.new_interval_var(
+            start_var,
+            duration,
+            end_var,
+            f"interval_{program}_{print_col}_{equip}"
+        )
 
-            equip_intervals.append({
-                "program": program,
-                "print_col": print_col,
-                "requested_time": requested_time,
-                "start_minutes": start_minutes,
-                "warmup_time": warmup_time,
-                "block_time": block_time,
-                "cooldown_time": cooldown_time,
-                "equip": equip,
-                "start": start_var,
-                "end": end_var,
-            })
+        equip_usage.setdefault(equip, []).append(interval)
 
-        # Equipment grouping constraint — mini must not be sandwiched
-        if is_mini_room_program(program) and len(class_usage_list[class_key]["items"]) > 1:
-            mini_items = [
-                item for item, equip in zip(
-                    class_usage_list[class_key]["items"], equipment_list
-                )
-                if get_room(equip) == "mini_room"
-            ]
-            non_mini_items = [
-                item for item, equip in zip(
-                    class_usage_list[class_key]["items"], equipment_list
-                )
-                if get_room(equip) != "mini_room"
-            ]
+        room = get_room(equip)
+        room_usage.setdefault(room, []).append(interval)
 
-            if mini_items and non_mini_items:
-                # Boolean: True = mini first, False = non-mini first
-                mini_first = model.new_bool_var(f"mini_first_{program}_{print_col}")
+        # BG Floor classification
+        if equip.strip().upper() == "BG FLOOR":
+            if is_competitive_program(program) and program in {"8 HR XCEL", "LAURELETTES"}:
+                bg_floor_usage["shared_comp"].append(interval)
+            elif is_competitive_program(program):
+                bg_floor_usage["restricted_comp"].append(interval)
+            else:
+                bg_floor_usage["rec"].append(interval)
 
-                mini_max_end = model.new_int_var(
-                    window_start, window_end, f"mini_max_end_{program}_{print_col}"
-                )
-                non_mini_max_end = model.new_int_var(
-                    window_start, window_end, f"non_mini_max_end_{program}_{print_col}"
-                )
-                mini_min_start = model.new_int_var(
-                    window_start, window_end, f"mini_min_start_{program}_{print_col}"
-                )
-                non_mini_min_start = model.new_int_var(
-                    window_start, window_end, f"non_mini_min_start_{program}_{print_col}"
-                )
+        class_usage_list[class_key]["items"].append({
+            "start": start_var,
+            "end": end_var,
+            "interval": interval
+        })
 
-                model.add_max_equality(mini_max_end, [i["end"] for i in mini_items])
-                model.add_max_equality(non_mini_max_end, [i["end"] for i in non_mini_items])
-                model.add_min_equality(mini_min_start, [i["start"] for i in mini_items])
-                model.add_min_equality(non_mini_min_start, [i["start"] for i in non_mini_items])
+        equip_intervals.append({
+            "program": program,
+            "print_col": print_col,
+            "requested_time": requested_time,
+            "start_minutes": entry["start_minutes"],
+            "warmup_time": entry["warmup_time"],
+            "block_time": block_time,
+            "cooldown_time": entry["cooldown_time"],
+            "equip": equip,
+            "start": start_var,
+            "end": end_var,
+        })
 
-                # If mini_first: all mini ends <= all non-mini starts
-                model.add(mini_max_end <= non_mini_min_start).only_enforce_if(mini_first)
-                # If not mini_first: all non-mini ends <= all mini starts
-                model.add(non_mini_max_end <= mini_min_start).only_enforce_if(mini_first.Not())
 
-                logger.debug(
-                    "Grouping constraint added for %s | col %s", program, print_col
-                )
+# ── Grouping constraint ────────────────────────────────────────────────────────
 
-        #Break constraint for competitive classes
+def _apply_grouping_constraint(
+    model, program, print_col, equipment_list,
+    class_usage_list, class_key, window_start, window_end
+):
+    """
+    Ensures mini equipment blocks are grouped together and not sandwiched
+    between non-mini blocks. Applies only to young rec programs.
+    Valid orderings: mini-mini-large or large-mini-mini.
+    Invalid: mini-large-mini.
 
-        if is_competitive_program(program):
-            break_duration = 15
-            logger.debug(
-                "COMP WINDOW | %s | window_start=%d (%s) | window_end=%d (%s) | block_time=%d | n=%d | total_blocks=%d | break=15 | available=%d",
-                program, window_start, to_time_str(window_start),
-                window_end, to_time_str(window_end),
-                block_time, n, block_time * n,
-                window_end - window_start - (block_time * n)
-            )
+    Args:
+        model: CP-SAT model
+        program: uppercase program name
+        print_col: coach column letter
+        equipment_list: list of equipment names for this program
+        class_usage_list: dict mapping class_key -> class data
+        class_key: tuple (program, print_col, requested_time)
+        window_start: earliest start minute for equipment blocks
+        window_end: latest end minute for equipment blocks
 
-            #Break interval is movable within class window
-            break_start = model.new_int_var(
-                window_start,
-                window_end - break_duration,
-                f"break_start_{program}_{print_col}"
-            )
-            break_end = model.new_int_var(
-                window_start + break_duration,
-                window_end,
-                f"break_end_{program}_{print_col}"
-            )
-            break_interval = model.new_interval_var(
-                break_start,
-                break_duration,
-                break_end,
-                f"break_interval{program}_{print_col}"
-            )
+    Returns:
+        None — adds constraints to model in place
+    """
+    if not is_mini_room_program(program):
+        return
 
-            #Break cannot overlap any equipment block
-            items = class_usage_list[class_key]["items"]
-            model.add_no_overlap([item["interval"] for item in items] + [break_interval])
+    items = class_usage_list[class_key]["items"]
+    if len(items) <= 1:
+        return
 
-            #Hard constraint 1: at least 1 equipment block before break
-            model.add(break_start >= window_start + block_time)
+    mini_items = [
+        item for item, equip in zip(items, equipment_list)
+        if get_room(equip) == "mini_room"
+    ]
+    non_mini_items = [
+        item for item, equip in zip(items, equipment_list)
+        if get_room(equip) != "mini_room"
+    ]
 
-            #Hard constraint 2: at least 1 block after break
-            model.add(break_end <= window_end - block_time)
+    if not mini_items or not non_mini_items:
+        return
 
-            #Soft preference: break prefers to start at class midpoint
-            midpoint = window_start + (block_time * len(equipment_list)) // 2
-            deviation = model.new_int_var(
+    mini_first = model.new_bool_var(f"mini_first_{program}_{print_col}")
+
+    mini_max_end = model.new_int_var(window_start, window_end, f"mini_max_end_{program}_{print_col}")
+    non_mini_max_end = model.new_int_var(window_start, window_end, f"non_mini_max_end_{program}_{print_col}")
+    mini_min_start = model.new_int_var(window_start, window_end, f"mini_min_start_{program}_{print_col}")
+    non_mini_min_start = model.new_int_var(window_start, window_end, f"non_mini_min_start_{program}_{print_col}")
+
+    model.add_max_equality(mini_max_end, [i["end"] for i in mini_items])
+    model.add_max_equality(non_mini_max_end, [i["end"] for i in non_mini_items])
+    model.add_min_equality(mini_min_start, [i["start"] for i in mini_items])
+    model.add_min_equality(non_mini_min_start, [i["start"] for i in non_mini_items])
+
+    model.add(mini_max_end <= non_mini_min_start).only_enforce_if(mini_first)
+    model.add(non_mini_max_end <= mini_min_start).only_enforce_if(mini_first.Not())
+
+    logger.debug("Grouping constraint added for %s | col %s", program, print_col)
+
+
+# ── Break and priority constraint ──────────────────────────────────────────────
+
+def _apply_break_constraint(
+    model, program, print_col, equipment_list,
+    block_time, n, window_start, window_end,
+    class_usage_list, class_key,
+    break_deviations, priority_deviations
+):
+    """
+    For competitive classes: adds a moveable 15-minute break interval that
+    cannot overlap any equipment block, must have at least one block before
+    and after it, and prefers placement near the class midpoint.
+    Also adds soft preference for Comp Vault and BG Floor to start early.
+
+    Args:
+        model: CP-SAT model
+        program: uppercase program name
+        print_col: coach column letter
+        equipment_list: list of equipment names for this program
+        block_time: duration in minutes per equipment block
+        n: number of equipment blocks
+        window_start: earliest start minute for equipment blocks
+        window_end: latest end minute for equipment blocks
+        class_usage_list: dict mapping class_key -> class data
+        class_key: tuple (program, print_col, requested_time)
+        break_deviations: list to accumulate break deviation variables
+        priority_deviations: list to accumulate priority deviation variables
+
+    Returns:
+        None — adds constraints to model and mutates deviation lists in place
+    """
+    if not is_competitive_program(program):
+        return
+
+    break_duration = 15
+
+    logger.debug(
+        "COMP WINDOW | %s | window_start=%d (%s) | window_end=%d (%s) | "
+        "block_time=%d | n=%d | total_blocks=%d | break=15 | available=%d",
+        program, window_start, to_time_str(window_start),
+        window_end, to_time_str(window_end),
+        block_time, n, block_time * n,
+        window_end - window_start - (block_time * n)
+    )
+
+    break_start = model.new_int_var(
+        window_start,
+        window_end - break_duration,
+        f"break_start_{program}_{print_col}"
+    )
+    break_end = model.new_int_var(
+        window_start + break_duration,
+        window_end,
+        f"break_end_{program}_{print_col}"
+    )
+    break_interval = model.new_interval_var(
+        break_start,
+        break_duration,
+        break_end,
+        f"break_interval_{program}_{print_col}"
+    )
+
+    items = class_usage_list[class_key]["items"]
+    model.add_no_overlap([item["interval"] for item in items] + [break_interval])
+
+    # Hard constraint 1 — at least one block before break
+    model.add(break_start >= window_start + block_time)
+
+    # Hard constraint 2 — at least one block after break
+    model.add(break_end <= window_end - block_time)
+
+    # Soft preference — break near midpoint
+    midpoint = window_start + (block_time * n) // 2
+    deviation = model.new_int_var(
+        0,
+        window_end - window_start,
+        f"break_deviation_{program}_{print_col}"
+    )
+    model.add_abs_equality(deviation, break_start - midpoint)
+    break_deviations.append(deviation)
+
+    class_usage_list[class_key]["break"] = {
+        "start": break_start,
+        "end": break_end
+    }
+
+    logger.debug(
+        "Break constraint added for %s | col %s | midpoint=%s",
+        program, print_col, to_time_str(midpoint)
+    )
+
+    # Soft preference — Comp Vault and BG Floor as early as possible
+    PRIORITY_EQUIPMENT = {"COMP VAULT", "BG FLOOR"}
+    for item, equip in zip(items, equipment_list):
+        if equip.strip().upper() in PRIORITY_EQUIPMENT:
+            prio_deviation = model.new_int_var(
                 0,
                 window_end - window_start,
-                f"break_deviation_{program}_{print_col}"
+                f"prio_dev_{program}_{print_col}_{equip}"
             )
-            model.add_abs_equality(deviation, break_start - midpoint)
-            break_deviations.append(deviation)
-
-            #Store break for output
-            class_usage_list[class_key]["break"] = {
-                "start": break_start,
-                "end": break_end
-            }
-
+            model.add(prio_deviation == item["start"] - window_start)
+            priority_deviations.append(prio_deviation)
             logger.debug(
-                "Break constraint added for %s | col %s | midpoint=%s",
-                program, print_col, to_time_str(midpoint)
+                "Priority preference added for %s | %s | col %s",
+                equip, program, print_col
             )
 
-            # Soft preference - comp vault and BG Floor scheduled as early as possible
-            PRIORITY_EQUIPMENT = {"COMP VAULT", "BG FLOOR"}
-            for item, equip in zip(class_usage_list[class_key]["items"], equipment_list):
-                if equip.strip().upper() in PRIORITY_EQUIPMENT:
-                    prio_deviation = model.new_int_var(
-                        0,
-                        window_end - window_start,
-                        f"prio_def_{program}_{print_col}_{equip}"
-                    )
-                    model.add(prio_deviation == item["start"] - window_start)
-                    priority_deviations.append(prio_deviation)
-                    logger.debug(
-                        "Priority preference added for %s | %s | col %s",
-                        equip, program, print_col
-                    )
-    
-    # Minimize break deviations from midpoint
-    all_deviations = []
-    if break_deviations:
-        all_deviations.extend(break_deviations)
-    if priority_deviations:
-        all_deviations.extend([2 * d for d in priority_deviations])
-    if all_deviations:
-        model.minimize(sum(all_deviations))
 
-    # Cross-class equipment conflict constraint
+# ── Cross-class equipment constraints ──────────────────────────────────────────
+
+def _apply_equipment_conflict_constraints(model, equip_usage):
+    """
+    Prevents any two classes from using the same equipment simultaneously.
+    BG Floor is excluded here and handled separately by
+    _apply_bg_floor_sharing_constraints().
+
+    Args:
+        model: CP-SAT model
+        equip_usage: dict mapping equipment name -> list of intervals
+
+    Returns:
+        None — adds constraints to model in place
+    """
     for equip, intervals in equip_usage.items():
+        if equip.strip().upper() == "BG FLOOR":
+            continue
         if len(intervals) > 1:
             model.add_no_overlap(intervals)
 
-    #room-level conflict constraint -- no 2 classes in the same room simultaneously
-    #for room, intervals in room_usage.items():
-    #    if len(intervals) >1:
-    #        logger.debug("Room constraint: %s has %d intervals", room, len(intervals))
-    #        model.add_no_overlap(intervals)
 
-    # Intra-class constraints
+# ── Room constraints ───────────────────────────────────────────────────────────
+
+def _apply_room_constraints(model, room_usage):
+    """
+    Prevents any two classes from occupying the same room simultaneously.
+    Rooms are derived from equipment name prefixes:
+      MINI* -> mini_room, FR* -> fr_room, everything else -> main_gym.
+
+    Args:
+        model: CP-SAT model
+        room_usage: dict mapping room name -> list of intervals
+
+    Returns:
+        None — adds constraints to model in place
+    """
+    for room, intervals in room_usage.items():
+        if len(intervals) > 1:
+            model.add_no_overlap(intervals)
+
+
+# ── BG Floor sharing constraints ───────────────────────────────────────────────
+
+def _apply_bg_floor_sharing_constraints(model, bg_floor_usage):
+    """
+    Implements BG Floor sharing rules:
+      - restricted_comp (all comp except 8 HR XCEL and Laurelettes)
+        cannot overlap with anyone on BG Floor
+      - shared_comp (8 HR XCEL and Laurelettes) cannot overlap with
+        each other but CAN overlap with rec classes
+      - rec classes cannot overlap with each other on BG Floor
+
+    Args:
+        model: CP-SAT model
+        bg_floor_usage: dict with keys restricted_comp, shared_comp, rec
+                        each mapping to a list of intervals
+
+    Returns:
+        None — adds constraints to model in place
+    """
+    all_bg = (
+        bg_floor_usage["restricted_comp"] +
+        bg_floor_usage["shared_comp"] +
+        bg_floor_usage["rec"]
+    )
+
+    # restricted_comp cannot overlap with anyone
+    for restricted in bg_floor_usage["restricted_comp"]:
+        others = [i for i in all_bg if i != restricted]
+        for other in others:
+            model.add_no_overlap([restricted, other])
+
+    # shared_comp cannot overlap with each other
+    if len(bg_floor_usage["shared_comp"]) > 1:
+        model.add_no_overlap(bg_floor_usage["shared_comp"])
+
+    # rec cannot overlap with each other
+    if len(bg_floor_usage["rec"]) > 1:
+        model.add_no_overlap(bg_floor_usage["rec"])
+
+    # shared_comp vs rec — overlap allowed, no constraint added
+
+
+# ── Intra-class constraints ────────────────────────────────────────────────────
+
+def _apply_intra_class_constraints(model, class_usage_list, equip_intervals):
+    """
+    Enforces per-class constraints:
+      - Each equipment block starts after warmup ends
+      - Each equipment block ends before window ends
+      - No two equipment blocks within the same class overlap
+      - Equipment blocks are contiguous (no gaps), with break duration
+        accounted for in competitive classes
+
+    Args:
+        model: CP-SAT model
+        class_usage_list: dict mapping class_key -> class data including items and break
+        equip_intervals: flat list of all interval dicts used for total_duration calculation
+
+    Returns:
+        None — adds constraints to model in place
+    """
     for class_key, data in class_usage_list.items():
         items = data["items"]
         warmup_end = data["warmup_end"]
@@ -492,9 +712,9 @@ def attempt_solve(classes, program_equipment):
             model.add_no_overlap([item["interval"] for item in items])
 
         total_duration = sum(
-            entry["block_time"]
-            for entry in equip_intervals
-            if (entry["program"], entry["print_col"], entry["requested_time"]) == class_key
+            e["block_time"]
+            for e in equip_intervals
+            if (e["program"], e["print_col"], e["requested_time"]) == class_key
         )
 
         starts = [item["start"] for item in items]
@@ -505,9 +725,6 @@ def attempt_solve(classes, program_equipment):
 
         model.add_min_equality(min_start, starts)
         model.add_max_equality(max_end, ends)
-        prog_name = class_key[0]
-        beak_allowance = 15 if is_competitive_program(prog_name) else 0
-        #model.add(max_end - min_start == total_duration + beak_allowance)
 
         prog_name = class_key[0]
         if is_competitive_program(prog_name) and "break" in data:
@@ -517,9 +734,32 @@ def attempt_solve(classes, program_equipment):
             model.add(break_info["end"] <= max_end)
         else:
             model.add(max_end - min_start == total_duration)
-            
 
-    return solve_model(model, equip_intervals, class_usage_list)
+
+# ── Objective ──────────────────────────────────────────────────────────────────
+
+def _apply_objective(model, break_deviations, priority_deviations):
+    """
+    Sets the solver objective to minimize the weighted sum of:
+      - Break displacement from class midpoint (weight 1)
+      - Priority equipment (Comp Vault, BG Floor) displacement
+        from window start (weight 2)
+
+    Args:
+        model: CP-SAT model
+        break_deviations: list of deviation int vars for break placement
+        priority_deviations: list of deviation int vars for priority equipment
+
+    Returns:
+        None — sets model objective in place
+    """
+    all_deviations = []
+    if break_deviations:
+        all_deviations.extend(break_deviations)
+    if priority_deviations:
+        all_deviations.extend([2 * d for d in priority_deviations])
+    if all_deviations:
+        model.minimize(sum(all_deviations))
 
 
 
